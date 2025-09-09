@@ -9,6 +9,9 @@ import warnings
 warnings.simplefilter("error")
 import sys
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 
 def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
     np.random.seed(seedNumber)
@@ -127,16 +130,6 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
     Counter(Counter(indexPrimary.values()).values())
 
     # construct graph and edge list
-    def circumRadius(p1, p2, p3):
-        a = np.linalg.norm(p2 - p3)
-        b = np.linalg.norm(p1 - p3)
-        c = np.linalg.norm(p1 - p2)
-        
-        cross_product = np.cross(p2 - p1, p3 - p1)
-        area = np.linalg.norm(cross_product) / 2
-
-        return (a * b * c) / (4 * area)
-
     def point_to_segment_distance(P, A, B):
         AB = B - A
         normAB2 = np.dot(AB, AB)
@@ -308,33 +301,6 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
     nStates = len(statePrimary)
     print("Number of primary states = ",nStates)
 
-    statePrimaryInverse = {value: key for key, value in enumerate(statePrimary)} # statePrimaryInverse[original id] = new id
-
-    # compute volume of tetra
-    def sample_point_in_tetrahedron(vertices):
-        rn = -np.log(np.random.rand(4))
-        return np.dot(rn / np.sum(rn), vertices)
-
-    nTrails = 10_000
-    def cavityVolume(vertices, r):
-        V0 = abs(np.dot(vertices[1]-vertices[0], np.cross(vertices[2]-vertices[0], vertices[3]-vertices[0]))) / 6.0
-
-        cnt = 0
-        for _  in range(nTrails):
-            pt = sample_point_in_tetrahedron(vertices)
-            for i in range(4):
-                if np.linalg.norm(pt - vertices[i]) < r:
-                    cnt += 1
-                    break
-        if cnt == nTrails:
-            cnt -= 1
-        return V0 * (nTrails - cnt) / nTrails
-
-
-    idVol = np.zeros(nStates)
-    for cnt, i in enumerate(statePrimary):
-        idVol[cnt] = cavityVolume(points_PBC[tetra.simplices[i]], r_cut)
-
     def distance_to_bisector_intersection(A, B, C):
         """
         AB cross AC bisector at X, make sure AB is the longest side
@@ -428,37 +394,93 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
             areaTriangle += r**2 * np.arccos(dC/r) - dC * np.sqrt(r**2 - dC**2)
 
         return areaTriangle
+    
+    # compute volume of tetra
+    def tetra_volume(vertices):
+        """Exact tetra volume from 4x3 array."""
+        v = np.asarray(vertices, float).reshape(4,3)
+        return abs(np.dot(v[1]-v[0], np.cross(v[2]-v[0], v[3]-v[0]))) / 6.0
 
-    def periodicSearch(com, comDict, box_size):
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    comTmp = (com[0] + dx*box_size, com[1] + dy*box_size, com[2] + dz*box_size)
-                    if comTmp in comDict:
-                        return comDict[comTmp]
-        return -1
 
-    transitionPrimary = set()
-    G = nx.DiGraph()
-    for i in statePrimary:
-        neighborTmp = []
-        for neighbor in tetra.neighbors[i]:
-            if indexPrimary[neighbor] in statePrimary:
-                neighborVertices = points_PBC[tetra.simplices[neighbor]]
-                vCommon = list(set(tetra.simplices[i]) & set(tetra.simplices[neighbor]))
-                exitArea = computeExitArea(points_PBC[vCommon[0]], points_PBC[vCommon[1]], points_PBC[vCommon[2]], r_cut)
-                if exitArea > 0.0:
-                    transitionPrimary.add(i)
-                    transitionPrimary.add(indexPrimary[neighbor])
-                    neighborTmp.append(indexPrimary[neighbor])
-                    G.add_edge(i, indexPrimary[neighbor])
+    def sample_points_in_tetrahedron(vertices, n):
+        rng = np.random.default_rng()
+        w = rng.dirichlet(np.ones(4), size=n)        # (n,4)
+        v = np.asarray(vertices, float).reshape(4,3) # (4,3)
+        return w @ v
+
+    def cavityVolume(vertices, r, nTrails=int(1e9)):
+        v = np.asarray(vertices, float).reshape(4,3)
+        V0 = tetra_volume(v)
+
+        pts = sample_points_in_tetrahedron(v, nTrails)             # (n,3)
+        d2 = ((pts[:,None,:] - v[None,:,:])**2).sum(axis=2)         # (n,4)
+        covered = (d2 <= (r*r)).any(axis=1)                         # (n,)
+        p_uncovered = 1.0 - covered.mean()
+
+        est = V0 * p_uncovered
+        return est
+
+    transitionPrimary = set(statePrimary)
+    newStates = list(transitionPrimary)[:]
+    G = nx.Graph()
+    while len(newStates) > 0:
+        newState = newStates.pop()
+        for neighbor in tetra.neighbors[newState]:
+            vCommon = list(set(tetra.simplices[newState]) & set(tetra.simplices[neighbor]))
+            exitArea = computeExitArea(points_PBC[vCommon[0]], points_PBC[vCommon[1]], points_PBC[vCommon[2]], r_cut)
+            if exitArea > 0.0 and cavityVolume(points_PBC[tetra.simplices[neighbor]], r_cut, int(1e6)) > 0.0:
+                if newState > indexPrimary[neighbor]:
+                    G.add_edge(indexPrimary[neighbor], newState)
+                else:
+                    G.add_edge(newState, indexPrimary[neighbor])
+                if indexPrimary[neighbor] not in transitionPrimary:
+                    newStates.append(indexPrimary[neighbor])
+                transitionPrimary.add(newState)
+                transitionPrimary.add(indexPrimary[neighbor])
                 
-    print("States not accessible: ", sorted(list((set(statePrimary) - transitionPrimary))))
-    print("States not accessible: ", sorted(list((transitionPrimary - set(statePrimary)))))
+    transitionPrimary = list(transitionPrimary)
+    transitionPrimary.sort()
 
-    # test unidirectional edge
-    unidir_edges = [(u, v) for u, v in G.edges() if not G.has_edge(v, u)]
-    print("Unidirectional edges:", unidir_edges)
+    sccs = list(nx.connected_components(G))
+    sccs = sorted(sccs, key=len, reverse = True)
+    sccs = [list(comp) for comp in sccs]
+    print("Number of clusters: ", len(sccs))
+
+    idVol = dict()
+    for cnt, i in enumerate(transitionPrimary):
+        idVol[i] = cavityVolume(points_PBC[tetra.simplices[i]], r_cut, int(1e6))
+
+     # compute channel area between neighboring tetrahedra
+    channelArea = dict()
+    for _, i in enumerate(transitionPrimary):
+        for j in tetra.neighbors[i]:
+            if i<indexPrimary[j] and indexPrimary[j] in transitionPrimary:
+                vCommon = list(set(tetra.simplices[i]) & set(tetra.simplices[j]))
+                exitArea = computeExitArea(points_PBC[vCommon[0]], points_PBC[vCommon[1]], points_PBC[vCommon[2]], r_cut)
+                if exitArea > 0.0 and idVol[indexPrimary[j]] > 0.0:
+                    channelArea[(i, indexPrimary[j])] = exitArea
+
+    channelArea_df = pd.DataFrame(list(channelArea.keys()), columns=['i', 'j'])
+    channelArea_df['area'] = channelArea.values()
+
+    # Improved search: find all pairs (i, j) in channelArea_df that are not in G.edges()
+    missing_edges = []
+    edges_set = set(G.edges())
+    for i, row in channelArea_df.iterrows():
+        e1, e2 = row['i'], row['j']
+        if (e1, e2) not in edges_set and (e2, e1) not in edges_set:
+            missing_edges.append((e1, e2))
+    print("missing edges: ", missing_edges)
+
+    missing_edges = []
+    for edge in G.edges():
+        e1, e2 = edge
+        if e1 > e2:
+            e1, e2 = e2, e1
+        if len(channelArea_df[(channelArea_df['i'] == e1) & (channelArea_df['j'] == e2)]) == 0:
+            missing_edges.append((e1, e2))
+    print("missing edges: ", missing_edges)
+
 
     points_id = [i for i in range(numBeads * 27)]
     points_image_id = [i%numBeads for i in range(numBeads * 27)]
@@ -482,20 +504,37 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
     tetra_df['is_prime'] = (tetra_df['x'] > 0) & (tetra_df['x'] < box_size) & (tetra_df['y'] > 0) & (tetra_df['y'] < box_size) & (tetra_df['z'] > 0) & (tetra_df['z'] < box_size)
     tetra_df['image_id'] = tetra_df['id'].apply(lambda x: indexPrimary[x])
 
-    tetra_df['is_percolation'] = tetra_df['id'].apply(lambda x: x in statePrimary)
+    tetra_df['is_percolation'] = tetra_df['id'].apply(lambda x: x in transitionPrimary)
+    tetra_df = tetra_df[tetra_df['is_percolation']]
     tetra_df['percolation_id'] = tetra_df['is_percolation'].cumsum()
     tetra_df.loc[~tetra_df['is_percolation'], 'percolation_id'] = -1
     tetra_df.loc[tetra_df['is_percolation'], 'percolation_id'] = tetra_df.loc[tetra_df['is_percolation'], 'percolation_id']-1
-    tetra_df.loc[tetra_df['is_percolation'], 'volume'] = tetra_df.loc[tetra_df['is_percolation'], 'percolation_id'].apply(lambda x: idVol[x])
-    tetra_df['vol_fraction'] = tetra_df['volume'] / sum(idVol)
+    tetra_df.loc[tetra_df['is_percolation'], 'volume'] = tetra_df.loc[tetra_df['is_percolation'], 'id'].apply(lambda x: idVol[x])
+    tetra_df['vol_fraction'] = tetra_df['volume'] / sum(idVol.values())
     tetra_df['vol_fraction'] = tetra_df['vol_fraction'].fillna(0)
     tetra_df['vol_fraction_cum'] = tetra_df['vol_fraction'].cumsum()
+    
 
     tetra_df['num_probes'] = tetra_df['vol_fraction'].apply(lambda x: int(x*numProbes)+1)
     tetra_df.loc[~tetra_df['is_percolation'], 'num_probes'] = 0
 
+    def tetra_volume(a, b, c, d) -> float:
+        return abs(np.dot(a - d, np.cross(b - d, c - d))) / 6.0
+
+    def point_in_tetra(v, p, tol: float = 1e-5) -> bool:
+        v = np.asarray(v, float).reshape(4, 3)
+        p = np.asarray(p, float).reshape(3)
+
+        V  = tetra_volume(v[0], v[1], v[2], v[3])
+        V1 = tetra_volume(p,    v[1], v[2], v[3])
+        V2 = tetra_volume(v[0], p,    v[2], v[3])
+        V3 = tetra_volume(v[0], v[1], p,    v[3])
+        V4 = tetra_volume(v[0], v[1], v[2], p)
+
+        return np.isclose(V1 + V2 + V3 + V4, V, atol=tol, rtol=0.0)
+
     probes_XYZ = []
-    for _ in range(numProbes):
+    for i in range(numProbes):
         ifOverlap = True
         while ifOverlap:
             ifOverlap = False
@@ -503,8 +542,11 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
             rd = np.random.random()
             ind = tetra_df.loc[tetra_df['vol_fraction_cum']>rd].iloc[0]['id']
             vertices = np.array([points_PBC[i] for i in tetra_df.loc[ind, 'obstacles_id']])
-            probeTmp = sample_point_in_tetrahedron(vertices)
+            probeTmp = sample_points_in_tetrahedron(vertices, 1)[0]
             
+            if not point_in_tetra(vertices, probeTmp):
+                raise SystemExit("Probe particle is not in the tetrahedron")
+                
             for obstacle in points_PBC:
                 if np.linalg.norm(probeTmp - obstacle) <= r_cut:
                     ifOverlap = True
@@ -541,6 +583,9 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
         lambda x: [int(i) for i in x] if isinstance(x, (list, np.ndarray)) else int(x)
     )
     tetra_df[tetra_df['is_prime']].to_csv(outfile, sep=',', index = False, float_format='%.18f')
+
+    outfile = filepath + '_area.txt'
+    channelArea_df.to_csv(outfile, index=False, float_format='%.18f')
 
 
 
