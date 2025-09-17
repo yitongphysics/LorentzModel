@@ -563,6 +563,8 @@ def percolationSample(numBeads, numProbes, box_size, seedNumber, filepath):
 
     tetra_df['volume'] = tetra_df['volume']/lengthUnit**3
 
+    channelArea_df['area'] = channelArea_df['area'] / lengthUnit**2
+
     # save configurations
     outfile = filepath + '.pos'
     with open(outfile, 'w') as output_fileID:

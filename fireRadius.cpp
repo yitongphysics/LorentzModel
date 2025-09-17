@@ -194,7 +194,6 @@ bool detectOverlap(vector<vector<double> > XYZ, vector<vector<double> > xyz0, do
             dz -= L * round(dz / L);
 
             if(dx*dx + dy*dy + dz*dz < (rB+rC) * (rB+rC)){
-                cout << ci << " " << bi << endl;
                 return true;
             }
         }
@@ -742,13 +741,6 @@ int main(int argc, char const *argv[]) {
             int lowestTetra = lowestProbeDensity(tetraInfo, xyz0);
             vector<vector<double> > detectProbe(1, vector<double> (3, 0.0));
             dxyz = 1e-3;
-
-            cout << lowestTetra << ' '<< dpos[cimax*3] << ' '<< dpos[cimax*3+1] << ' '<< dpos[cimax*3+2] << endl;
-            for(int i=0; i<4; i++){
-                cout << tetraInfo[lowestTetra].obstacles_id[i];
-                cout << " ";
-            }
-            cout << endl;
 
             while(true){
                 dpos[cimax*3] = tetraInfo[lowestTetra].x   + dxyz*dist(gen)-dxyz/2.0;
